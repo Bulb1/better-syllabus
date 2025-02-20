@@ -19,6 +19,19 @@ special_ranges = {key.lower(): value for key, value in special_ranges.items()}
 
 special_subjects = set(subject.lower() for subject in config.get("special_subjects", []))
 
+def update_semester(subject_name, semester_value):
+    """
+    Jeśli nazwa przedmiotu zaczyna się od klucza z special_ranges,
+    aktualizuje wartość semestru (np. "1" -> "1 - 2").
+    """
+    for prefix, offset in special_ranges.items():
+        if subject_name.lower().startswith(prefix):
+            try:
+                sem_int = int(semester_value)
+                return f"{sem_int} - {sem_int + offset}"
+            except ValueError:
+                return semester_value
+    return semester_value
 
 def extract_main_info_from_row(row):
     """
@@ -50,13 +63,11 @@ def extract_main_info_from_row(row):
     egzamin = True if egzamin_text == "T" else False
 
     # Przetwarzamy kolumnę Obligatoryjne
-    # Jeśli znaleziono obrazek, pobieramy wartość atrybutu alt; w przeciwnym razie pobieramy tekst z komórki.
     imgs = cells[10].find_elements(By.TAG_NAME, "img")
     if imgs:
         oblig_text = imgs[0].get_attribute("alt").strip()
     else:
         oblig_text = cells[10].text.strip()
-    # Jeżeli tekst odpowiada "Moduł obligatoryjny" (bez względu na wielkość liter), przyjmujemy True
     oblig = True if oblig_text.lower() == "moduł obligatoryjny" else False
 
     return {
@@ -68,7 +79,6 @@ def extract_main_info_from_row(row):
         "Egzamin": egzamin,
         "Obligatoryjne": oblig
     }
-
 
 def process_subject(subject_name, subject_url):
     """
@@ -89,10 +99,6 @@ def process_subject(subject_name, subject_url):
         except Exception:
             return ""
 
-    # Pomijamy pobieranie danych dotyczących semestru, układu zajęć, ECTS itd.
-    # gdyż zostaną one pobrane z głównej strony.
-
-    # Pobieramy pozostałe dane (Katedra, Koordynatorzy, Asystenci, Treści kształcenia, Nakład pracy, Wystawianie Ocen)
     katedra = get_text('//span[text()="Nazwa jednostki prowadzącej zajęcia:"]/parent::div/following-sibling::div//b')
 
     coordinator_elements = driver.find_elements(
@@ -166,7 +172,6 @@ def process_subject(subject_name, subject_url):
         "Wystawianie Ocen": wystawianie_ocen
     }
 
-
 # Konfiguracja Firefoksa i Geckodrivera
 service = Service("/usr/local/bin/geckodriver")
 options = webdriver.FirefoxOptions()
@@ -185,7 +190,6 @@ for el in subject_elements:
     try:
         row = el.find_element(By.XPATH, "./ancestor::tr")
         main_info = extract_main_info_from_row(row)
-        # Upewniamy się, że dane główne zostały pobrane
         if not main_info:
             continue
         name = main_info["Przedmiot"]
@@ -197,19 +201,13 @@ for el in subject_elements:
 
 logger.info(f"Znaleziono {len(subject_links)} pozycji (przedmioty lub moduły).")
 
+# Używamy jednego zbioru do deduplikacji pełnych nazw przedmiotów (w tym wersji specjalnych)
+processed_subjects = set()
 data = []
-processed_special_subjects = set()
 
 for idx, (subject_name, href, is_module, main_info) in enumerate(subject_links, start=1):
-    subject_name_lower = subject_name.lower()
-    # Jeśli przedmiot należy do specjalnych i już był przetworzony, pomijamy go
-    if subject_name_lower in special_subjects and subject_name_lower in processed_special_subjects:
-        logger.info(f"Przedmiot {subject_name} już przetworzony – pomijam.")
-        continue
-
-    if subject_name_lower in special_subjects:
-        processed_special_subjects.add(subject_name_lower)
-
+    # Aktualizacja semestru wg special_ranges
+    main_info["Semestr"] = update_semester(subject_name, main_info.get("Semestr", ""))
     logger.info(f"[{idx}/{len(subject_links)}] Przetwarzam: {subject_name}")
 
     if is_module:
@@ -222,7 +220,6 @@ for idx, (subject_name, href, is_module, main_info) in enumerate(subject_links, 
             module_subject_elements = driver.find_elements(By.XPATH, '//td[@class="left"]/a')
             logger.info(f"Moduł '{subject_name}' zawiera {len(module_subject_elements)} przedmiotów.")
 
-            # Pobierz dane z modułu przed rozpoczęciem nawigacji po poszczególnych przedmiotach
             module_subject_data = []
             for mod_el in module_subject_elements:
                 try:
@@ -230,14 +227,21 @@ for idx, (subject_name, href, is_module, main_info) in enumerate(subject_links, 
                     mod_main_info = extract_main_info_from_row(row)
                     mod_sub_name = mod_main_info.get("Przedmiot", "").strip()
                     mod_sub_url = mod_el.get_attribute("href")
+                    # Aktualizacja semestru dla przedmiotu z modułu
+                    mod_main_info["Semestr"] = update_semester(mod_sub_name, mod_main_info.get("Semestr", ""))
                     module_subject_data.append((mod_sub_name, mod_sub_url, mod_main_info))
                 except Exception as e:
                     logger.error(f"Błąd przy pobieraniu danych z modułu: {e}")
 
-            # Następnie iteruj po zebranych danych
             for mod_sub_name, mod_sub_url, mod_main_info in module_subject_data:
+                full_subject_name = f"{subject_name} - {mod_sub_name}"
+                # Sprawdzamy, czy dany przedmiot (pełna nazwa) został już przetworzony
+                if full_subject_name in processed_subjects:
+                    logger.info(f"Przedmiot {full_subject_name} już przetworzony – pomijam.")
+                    continue
+                processed_subjects.add(full_subject_name)
+
                 try:
-                    full_subject_name = f"{subject_name} - {mod_sub_name}"
                     mod_main_info["Przedmiot"] = full_subject_name
                     subject_data = process_subject(full_subject_name, mod_sub_url)
                     subject_data.update(mod_main_info)
@@ -246,6 +250,11 @@ for idx, (subject_name, href, is_module, main_info) in enumerate(subject_links, 
                     logger.error(f"Błąd przy przetwarzaniu przedmiotu {mod_sub_name}: {e}")
                 time.sleep(1)
     else:
+        # Dla przedmiotów spoza modułu kluczem będzie pełna nazwa
+        if subject_name in processed_subjects:
+            logger.info(f"Przedmiot {subject_name} już przetworzony – pomijam.")
+            continue
+        processed_subjects.add(subject_name)
         try:
             subject_data = process_subject(subject_name, href)
             subject_data.update(main_info)
@@ -254,7 +263,6 @@ for idx, (subject_name, href, is_module, main_info) in enumerate(subject_links, 
             logger.error(f"Błąd przy przetwarzaniu przedmiotu {subject_name}: {e}")
         time.sleep(1)
 
-# Uaktualniamy listę kolumn CSV, dodając nowe pola pobierane z głównej strony
 fieldnames = [
     "Semestr",
     "Przedmiot",
