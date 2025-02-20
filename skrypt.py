@@ -19,12 +19,70 @@ special_ranges = {key.lower(): value for key, value in special_ranges.items()}
 
 special_subjects = set(subject.lower() for subject in config.get("special_subjects", []))
 
+def update_semester(subject_name, semester_value):
+    """
+    Jeśli nazwa przedmiotu zaczyna się od klucza z special_ranges,
+    aktualizuje wartość semestru (np. "1" -> "1 - 2").
+    """
+    for prefix, offset in special_ranges.items():
+        if subject_name.lower().startswith(prefix):
+            try:
+                sem_int = int(semester_value)
+                return f"{sem_int} - {sem_int + offset}"
+            except ValueError:
+                return semester_value
+    return semester_value
+
+def extract_main_info_from_row(row):
+    """
+    Pobiera z wiersza tabeli dane:
+      - Semestr,
+      - Przedmiot (nazwa),
+      - Układ Zajęć (na podstawie kolumn W, C, L, P),
+      - Suma godzin,
+      - Punkty ECTS,
+      - Egzamin (True/False),
+      - Oblig. (True/False)
+    """
+    cells = row.find_elements(By.TAG_NAME, "td")
+    if len(cells) < 11:
+        return {}
+    semestr = cells[0].text.strip()
+    przedmiot = cells[2].text.strip()
+    # Układ zajęć – łączymy godziny z kolumn W, C, L i P
+    w = cells[3].text.strip()
+    c = cells[4].text.strip()
+    l = cells[5].text.strip()
+    p = cells[6].text.strip()
+    uklad_zajec = f"W{w} C{c} L{l} P{p}"
+    suma_godzin = cells[7].text.strip()
+    ects = cells[8].text.strip()
+
+    # Przetwarzamy kolumnę egzamin – "T" (True) lub "N" (False)
+    egzamin_text = cells[9].text.strip().upper()
+    egzamin = True if egzamin_text == "T" else False
+
+    # Przetwarzamy kolumnę Obligatoryjne
+    imgs = cells[10].find_elements(By.TAG_NAME, "img")
+    if imgs:
+        oblig_text = imgs[0].get_attribute("alt").strip()
+    else:
+        oblig_text = cells[10].text.strip()
+    oblig = True if oblig_text.lower() == "moduł obligatoryjny" else False
+
+    return {
+        "Semestr": semestr,
+        "Przedmiot": przedmiot,
+        "Układ Zajęć": uklad_zajec,
+        "Suma godzin": suma_godzin,
+        "Punkty ECTS": ects,
+        "Egzamin": egzamin,
+        "Obligatoryjne": oblig
+    }
+
 def process_subject(subject_name, subject_url):
     """
-    Przetwarza stronę przedmiotu i zwraca słownik z danymi:
-      - Semestr (dla wyjątkowych przedmiotów ustawiamy zakres, np. "1 - 2")
-      - Przedmiot (w którym dołączamy informację o ECTS)
-      - Układ Zajęć
+    Przetwarza stronę przedmiotu i zwraca słownik z dodatkowymi danymi:
       - Katedra
       - Koordynatorzy
       - Asystenci
@@ -41,51 +99,6 @@ def process_subject(subject_name, subject_url):
         except Exception:
             return ""
 
-    # Wydobywanie informacji o planie zajęć, ECTS oraz semestrze
-    try:
-        schedule_str = wait.until(EC.presence_of_element_located(
-            (By.XPATH, '//span[text()="Układ zajęć w planie studiów:"]/parent::div/following-sibling::div//b')
-        )).text.strip()
-        # Przykładowy format: "sem: 1 / W30 C45   / 6 ECTS / E"
-        parts = schedule_str.split("/")
-        if len(parts) >= 1:
-            sem_info = parts[0].strip()
-            match = re.search(r"sem:\s*(\d+)", sem_info, re.IGNORECASE)
-            semester = match.group(1) if match else ""
-        else:
-            semester = ""
-
-        if len(parts) >= 3:
-            uklad_zajec = parts[1].strip()
-            ects = parts[2].strip()
-        else:
-            uklad_zajec = ""
-            ects = ""
-    except Exception:
-        uklad_zajec = ""
-        ects = ""
-        semester = ""
-
-    # Dołączamy informację o ECTS do nazwy przedmiotu (jeśli istnieje)
-    if ects:
-        subject_name = f"{subject_name} {ects}"
-
-    # Ustawienie zakresu semestru dla przedmiotów ze specjalnymi regułami
-    range_offset = None
-    # Porównujemy z uwzględnieniem lower case
-    for prefix, offset in special_ranges.items():
-        if subject_name.lower().startswith(prefix):
-            range_offset = offset
-            break
-
-    if range_offset is not None:
-        try:
-            sem_int = int(semester)
-            semester = f"{sem_int} - {sem_int + range_offset}"
-        except ValueError:
-            pass
-
-    # Pobieramy pozostałe dane (Katedra, Koordynatorzy, Asystenci, Treści kształcenia, Nakład pracy, Wystawianie Ocen)
     katedra = get_text('//span[text()="Nazwa jednostki prowadzącej zajęcia:"]/parent::div/following-sibling::div//b')
 
     coordinator_elements = driver.find_elements(
@@ -151,9 +164,6 @@ def process_subject(subject_name, subject_url):
         wystawianie_ocen = ""
 
     return {
-        "Semestr": semester,
-        "Przedmiot": subject_name,
-        "Układ Zajęć": uklad_zajec,
         "Katedra": katedra,
         "Koordynatorzy": koordynatorzy,
         "Asystenci": asystenci,
@@ -172,29 +182,32 @@ main_url = "https://krk.prz.edu.pl/plany.pl?lng=PL&W=E&K=F&KW=&TK=html&S=70&P=&C
 driver.get(main_url)
 time.sleep(2)
 
+# Pobieramy wszystkie przedmioty na głównej stronie wraz z dodatkowymi danymi z wiersza
 subject_elements = driver.find_elements(By.XPATH, '//td[@class="left"]/a')
 subject_links = []
+
 for el in subject_elements:
-    name = el.text.strip()
-    href = el.get_attribute("href")
-    is_module = "javascript:plany_getLnk" in href
-    subject_links.append((name, href, is_module))
+    try:
+        row = el.find_element(By.XPATH, "./ancestor::tr")
+        main_info = extract_main_info_from_row(row)
+        if not main_info:
+            continue
+        name = main_info["Przedmiot"]
+        href = el.get_attribute("href")
+        is_module = "javascript:plany_getLnk" in href
+        subject_links.append((name, href, is_module, main_info))
+    except Exception as e:
+        logger.error(f"Błąd przy pobieraniu danych z wiersza: {e}")
 
 logger.info(f"Znaleziono {len(subject_links)} pozycji (przedmioty lub moduły).")
 
+# Używamy jednego zbioru do deduplikacji pełnych nazw przedmiotów (w tym wersji specjalnych)
+processed_subjects = set()
 data = []
-processed_special_subjects = set()
 
-for idx, (subject_name, href, is_module) in enumerate(subject_links, start=1):
-    subject_name_lower = subject_name.lower()
-    # Jeśli przedmiot należy do specjalnych i już był przetworzony, pomijamy go
-    if subject_name_lower in special_subjects and subject_name_lower in processed_special_subjects:
-        logger.info(f"Przedmiot {subject_name} już przetworzony – pomijam.")
-        continue
-
-    if subject_name_lower in special_subjects:
-        processed_special_subjects.add(subject_name_lower)
-
+for idx, (subject_name, href, is_module, main_info) in enumerate(subject_links, start=1):
+    # Aktualizacja semestru wg special_ranges
+    main_info["Semestr"] = update_semester(subject_name, main_info.get("Semestr", ""))
     logger.info(f"[{idx}/{len(subject_links)}] Przetwarzam: {subject_name}")
 
     if is_module:
@@ -207,45 +220,66 @@ for idx, (subject_name, href, is_module) in enumerate(subject_links, start=1):
             module_subject_elements = driver.find_elements(By.XPATH, '//td[@class="left"]/a')
             logger.info(f"Moduł '{subject_name}' zawiera {len(module_subject_elements)} przedmiotów.")
 
-            module_subjects = {}
+            module_subject_data = []
             for mod_el in module_subject_elements:
                 try:
-                    mod_sub_name = mod_el.text.strip()
+                    row = mod_el.find_element(By.XPATH, "./ancestor::tr")
+                    mod_main_info = extract_main_info_from_row(row)
+                    mod_sub_name = mod_main_info.get("Przedmiot", "").strip()
                     mod_sub_url = mod_el.get_attribute("href")
-                    full_subject_name = f"{subject_name} - {mod_sub_name}"
-                    module_subjects[full_subject_name] = mod_sub_url
+                    # Aktualizacja semestru dla przedmiotu z modułu
+                    mod_main_info["Semestr"] = update_semester(mod_sub_name, mod_main_info.get("Semestr", ""))
+                    module_subject_data.append((mod_sub_name, mod_sub_url, mod_main_info))
                 except Exception as e:
-                    logger.error(f"Błąd przy odczycie elementu modułu: {e}")
+                    logger.error(f"Błąd przy pobieraniu danych z modułu: {e}")
 
-            for full_subject_name, mod_sub_url in module_subjects.items():
+            for mod_sub_name, mod_sub_url, mod_main_info in module_subject_data:
+                full_subject_name = f"{subject_name} - {mod_sub_name}"
+                # Sprawdzamy, czy dany przedmiot (pełna nazwa) został już przetworzony
+                if full_subject_name in processed_subjects:
+                    logger.info(f"Przedmiot {full_subject_name} już przetworzony – pomijam.")
+                    continue
+                processed_subjects.add(full_subject_name)
+
                 try:
+                    mod_main_info["Przedmiot"] = full_subject_name
                     subject_data = process_subject(full_subject_name, mod_sub_url)
+                    subject_data.update(mod_main_info)
                     data.append(subject_data)
                 except Exception as e:
-                    logger.error(f"Błąd przy przetwarzaniu przedmiotu {full_subject_name}: {e}")
+                    logger.error(f"Błąd przy przetwarzaniu przedmiotu {mod_sub_name}: {e}")
                 time.sleep(1)
-            driver.get(main_url)
-            time.sleep(2)
     else:
+        # Dla przedmiotów spoza modułu kluczem będzie pełna nazwa
+        if subject_name in processed_subjects:
+            logger.info(f"Przedmiot {subject_name} już przetworzony – pomijam.")
+            continue
+        processed_subjects.add(subject_name)
         try:
             subject_data = process_subject(subject_name, href)
+            subject_data.update(main_info)
             data.append(subject_data)
         except Exception as e:
             logger.error(f"Błąd przy przetwarzaniu przedmiotu {subject_name}: {e}")
         time.sleep(1)
 
-csv_file = "przedmioty.csv"
-fieldnames = ["Semestr",
-              "Przedmiot",
-              "Układ Zajęć",
-              "Katedra",
-              "Koordynatorzy",
-              "Asystenci",
-              "Treści kształcenia",
-              "Nakład pracy",
-              "Wystawianie Ocen"
-              ]
+fieldnames = [
+    "Semestr",
+    "Przedmiot",
+    "Układ Zajęć",
+    "Suma godzin",
+    "Punkty ECTS",
+    "Egzamin",
+    "Obligatoryjne",
+    "Katedra",
+    "Koordynatorzy",
+    "Asystenci",
+    "Treści kształcenia",
+    "Nakład pracy",
+    "Wystawianie Ocen"
+]
 
+csv_file = "przedmioty.csv"
 with open(csv_file, "w", newline="", encoding="utf-8") as f:
     writer = csv.DictWriter(f, fieldnames=fieldnames)
     writer.writeheader()
