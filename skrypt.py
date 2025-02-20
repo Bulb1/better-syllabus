@@ -1,29 +1,20 @@
 import csv
-import time
 import re
 import yaml
 from loguru import logger
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.firefox.service import Service
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 # Wczytanie konfiguracji z rules.yaml
 with open("rules.yaml", "r", encoding="utf-8") as file:
     config = yaml.safe_load(file)
+special_ranges = {key.lower(): value for key, value in config.get("special_ranges", {}).items()}
+special_subjects = {subject.lower() for subject in config.get("special_subjects", [])}
 
-special_ranges = config.get("special_ranges", {})
-# Używamy lower() aby później łatwo porównać z nazwami przedmiotów
-special_ranges = {key.lower(): value for key, value in special_ranges.items()}
-
-special_subjects = set(subject.lower() for subject in config.get("special_subjects", []))
+module_regex = re.compile(r"plany_getLnk\('([^']+)'\)")
 
 def update_semester(subject_name, semester_value):
-    """
-    Jeśli nazwa przedmiotu zaczyna się od klucza z special_ranges,
-    aktualizuje wartość semestru (np. "1" -> "1 - 2").
-    """
     for prefix, offset in special_ranges.items():
         if subject_name.lower().startswith(prefix):
             try:
@@ -91,11 +82,11 @@ def process_subject(subject_name, subject_url):
       - Wystawianie Ocen
     """
     driver.get(subject_url)
-    wait = WebDriverWait(driver, 10)
 
     def get_text(xpath):
         try:
-            return wait.until(EC.presence_of_element_located((By.XPATH, xpath))).text.strip()
+            element = driver.find_element(By.XPATH, xpath)
+            return element.text.strip() if element else ""
         except Exception:
             return ""
 
@@ -175,17 +166,16 @@ def process_subject(subject_name, subject_url):
 # Konfiguracja Firefoksa i Geckodrivera
 service = Service("/usr/local/bin/geckodriver")
 options = webdriver.FirefoxOptions()
+options.set_preference("permissions.default.image", 2)
+options.set_preference("dom.ipc.plugins.enabled.libflashplayer.so", False)
 options.add_argument("--headless")
-driver = webdriver.Firefox(service=service, options=options)
 
+driver = webdriver.Firefox(service=service, options=options)
 main_url = "https://krk.prz.edu.pl/plany.pl?lng=PL&W=E&K=F&KW=&TK=html&S=70&P=&C=2023&erasmus=&O="
 driver.get(main_url)
-time.sleep(2)
 
-# Pobieramy wszystkie przedmioty na głównej stronie wraz z dodatkowymi danymi z wiersza
 subject_elements = driver.find_elements(By.XPATH, '//td[@class="left"]/a')
 subject_links = []
-
 for el in subject_elements:
     try:
         row = el.find_element(By.XPATH, "./ancestor::tr")
@@ -205,18 +195,25 @@ logger.info(f"Znaleziono {len(subject_links)} pozycji (przedmioty lub moduły)."
 processed_subjects = set()
 data = []
 
+module_regex = re.compile(r"plany_getLnk\('([^']+)'\)")# Dodajemy zbiór do deduplikacji modułów
+processed_modules = set()
+
 for idx, (subject_name, href, is_module, main_info) in enumerate(subject_links, start=1):
-    # Aktualizacja semestru wg special_ranges
     main_info["Semestr"] = update_semester(subject_name, main_info.get("Semestr", ""))
     logger.info(f"[{idx}/{len(subject_links)}] Przetwarzam: {subject_name}")
 
     if is_module:
-        m = re.search(r"plany_getLnk\('([^']+)'\)", href)
+        # Sprawdzamy, czy moduł już został przetworzony
+        if subject_name in processed_modules:
+            logger.info(f"Moduł {subject_name} już przetworzony – pomijam.")
+            continue
+        processed_modules.add(subject_name)
+
+        m = module_regex.search(href)
         if m:
             module_relative = m.group(1)
             module_url = "https://krk.prz.edu.pl/" + module_relative
             driver.get(module_url)
-            time.sleep(2)
             module_subject_elements = driver.find_elements(By.XPATH, '//td[@class="left"]/a')
             logger.info(f"Moduł '{subject_name}' zawiera {len(module_subject_elements)} przedmiotów.")
 
@@ -227,7 +224,6 @@ for idx, (subject_name, href, is_module, main_info) in enumerate(subject_links, 
                     mod_main_info = extract_main_info_from_row(row)
                     mod_sub_name = mod_main_info.get("Przedmiot", "").strip()
                     mod_sub_url = mod_el.get_attribute("href")
-                    # Aktualizacja semestru dla przedmiotu z modułu
                     mod_main_info["Semestr"] = update_semester(mod_sub_name, mod_main_info.get("Semestr", ""))
                     module_subject_data.append((mod_sub_name, mod_sub_url, mod_main_info))
                 except Exception as e:
@@ -235,7 +231,6 @@ for idx, (subject_name, href, is_module, main_info) in enumerate(subject_links, 
 
             for mod_sub_name, mod_sub_url, mod_main_info in module_subject_data:
                 full_subject_name = f"{subject_name} - {mod_sub_name}"
-                # Sprawdzamy, czy dany przedmiot (pełna nazwa) został już przetworzony
                 if full_subject_name in processed_subjects:
                     logger.info(f"Przedmiot {full_subject_name} już przetworzony – pomijam.")
                     continue
@@ -248,7 +243,6 @@ for idx, (subject_name, href, is_module, main_info) in enumerate(subject_links, 
                     data.append(subject_data)
                 except Exception as e:
                     logger.error(f"Błąd przy przetwarzaniu przedmiotu {mod_sub_name}: {e}")
-                time.sleep(1)
     else:
         # Dla przedmiotów spoza modułu kluczem będzie pełna nazwa
         if subject_name in processed_subjects:
@@ -261,7 +255,6 @@ for idx, (subject_name, href, is_module, main_info) in enumerate(subject_links, 
             data.append(subject_data)
         except Exception as e:
             logger.error(f"Błąd przy przetwarzaniu przedmiotu {subject_name}: {e}")
-        time.sleep(1)
 
 fieldnames = [
     "Semestr",
