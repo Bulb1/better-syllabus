@@ -1,12 +1,9 @@
 import time
-import re
-import yaml
 from collections import Counter
+import yaml
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.firefox.service import Service
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 # Konfiguracja Firefoksa i Geckodrivera
 service = Service("/usr/local/bin/geckodriver")
@@ -18,16 +15,35 @@ main_url = "https://krk.prz.edu.pl/plany.pl?lng=PL&W=E&K=F&KW=&TK=html&S=70&P=&C
 driver.get(main_url)
 time.sleep(2)
 
-# Pobieranie nazw przedmiotów
+# Pobieramy wszystkie elementy zawierające nazwę przedmiotu
 subject_elements = driver.find_elements(By.XPATH, '//td[@class="left"]/a')
-subject_names = [el.text.strip().lower() for el in subject_elements]
 
-# Liczenie wystąpień przedmiotów
+subject_names = []
+current_module = None  # Będziemy zapamiętywać nazwę aktualnego modułu
+
+for el in subject_elements:
+    text = el.text.strip().lower()
+    href = el.get_attribute("href")
+    # Jeżeli href zawiera "javascript:plany_getLnk", to traktujemy ten wiersz jako moduł
+    if "javascript:plany_getLnk" in href:
+        current_module = text
+        subject_names.append(text)
+    else:
+        # Jeżeli mamy już ustalony aktualny moduł i tekst zaczyna się od "<moduł> -"
+        # ale nie zawiera jeszcze podwójnego prefiksu, to dodajemy go.
+        prefix = f"{current_module} -"
+        double_prefix = f"{current_module} - {current_module}"
+        if current_module is not None and text.startswith(prefix) and not text.startswith(double_prefix):
+            new_text = f"{current_module} - {text}"
+            subject_names.append(new_text)
+        else:
+            subject_names.append(text)
+
+# Liczymy wystąpienia dla każdego przedmiotu
 subject_counts = Counter(subject_names)
-
 driver.quit()
 
-# Wczytanie istniejącego rules.yaml
+# Wczytanie istniejącego pliku rules.yaml lub utworzenie pustej konfiguracji
 try:
     with open("rules.yaml", "r", encoding="utf-8") as file:
         config = yaml.safe_load(file) or {}
@@ -37,13 +53,12 @@ except FileNotFoundError:
 special_ranges = config.get("special_ranges", {})
 special_subjects = set(config.get("special_subjects", []))
 
-# Aktualizacja special_ranges i special_subjects
+# Dla przedmiotów, które pojawiają się więcej niż raz, ustawiamy zakres (ilość powtórzeń pomniejszoną o 1)
 for subject, count in subject_counts.items():
     if count > 1:
-        special_ranges[subject] = count-1 # Jak jakiś przedmiot jest 4 razy to zakres jest np. 3-6 nie 3-7
+        special_ranges[subject] = count - 1  # np. gdy przedmiot występuje 4 razy, zakres to 3
         special_subjects.add(subject)
 
-# Zapis do rules.yaml
 new_config = {
     "special_ranges": special_ranges,
     "special_subjects": list(special_subjects)
