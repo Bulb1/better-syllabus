@@ -4,7 +4,6 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.firefox.service import Service
 
-
 # Konfiguracja Firefoksa i Geckodrivera
 service = Service("/usr/local/bin/geckodriver")
 options = webdriver.FirefoxOptions()

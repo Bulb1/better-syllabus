@@ -174,6 +174,30 @@ driver = webdriver.Firefox(service=service, options=options)
 main_url = "https://krk.prz.edu.pl/plany.pl?lng=PL&W=E&K=F&KW=&TK=html&S=70&P=&C=2023&erasmus=&O="
 driver.get(main_url)
 
+# --- Ekstrakcja nazwy specjalności dla późniejszej nazwy pliku ---
+try:
+    # Szukamy akapitu (<p>) wewnątrz elementu o id "tresc-raportu", który zawiera <strong> z "Specjalność"
+    specialty_element = driver.find_element(
+        By.XPATH, '//div[@id="tresc-raportu"]/p[strong[contains(text(), "Specjalność")]]'
+    )
+    # Pobieramy zawartość HTML tego akapitu
+    specialty_html = specialty_element.get_attribute("innerHTML")
+    # Używamy wyrażenia regularnego, aby pobrać tekst po tagu <strong>
+    match = re.search(r"<strong>Specjalność:?</strong>\s*(.+)", specialty_html)
+    if match:
+        specialty = match.group(1).strip()
+    else:
+        raise ValueError("Nie znaleziono tekstu specjalności")
+    # Zamiana spacji i znaków nowej linii na podkreślenia
+    specialty_filename = specialty.replace(" ", "_").replace("\n", "_")
+    # Usuwamy potencjalnie niedozwolone znaki w nazwie pliku
+    specialty_filename = re.sub(r'[\/:*?"<>|]', '', specialty_filename)
+    # (Opcjonalnie) Dodajemy rozszerzenie .csv, jeśli jest wymagane
+    specialty_filename = specialty_filename + ".csv"
+except Exception as e:
+    logger.error("Nie można pobrać nazwy specjalności, używam domyślnej nazwy")
+    specialty_filename = "specjalnosc.csv"
+
 subject_elements = driver.find_elements(By.XPATH, '//td[@class="left"]/a')
 subject_links = []
 for el in subject_elements:
@@ -195,7 +219,7 @@ logger.info(f"Znaleziono {len(subject_links)} pozycji (przedmioty lub moduły)."
 processed_subjects = set()
 data = []
 
-module_regex = re.compile(r"plany_getLnk\('([^']+)'\)")# Dodajemy zbiór do deduplikacji modułów
+# Dodajemy zbiór do deduplikacji modułów
 processed_modules = set()
 
 for idx, (subject_name, href, is_module, main_info) in enumerate(subject_links, start=1):
@@ -272,11 +296,38 @@ fieldnames = [
     "Wystawianie Ocen"
 ]
 
-csv_file = "przedmioty.csv"
-with open(csv_file, "w", newline="", encoding="utf-8") as f:
-    writer = csv.DictWriter(f, fieldnames=fieldnames)
-    writer.writeheader()
-    writer.writerows(data)
+# Podział danych na dwa zbiory:
+# - Przedmioty z semestrów 1-4
+# - Pozostałe przedmioty (np. semestr 5+)
+data_1_2 = []
+data_others = []
+for d in data:
+    try:
+        sem = d.get("Semestr", "")
+        # Pobieramy pierwszy numer – przyjmujemy, że jest liczbą
+        sem_num = int(sem.split()[0])
+    except Exception:
+        sem_num = None
+    if sem_num is not None and sem_num <= 4:
+        data_1_2.append(d)
+    else:
+        data_others.append(d)
 
-logger.info(f"Dane zapisane do pliku {csv_file}")
+# Zapis do CSV dla przedmiotów 1-4 semestr
+if data_1_2:
+    csv_file_1_2 = "1-2rok.csv"
+    with open(csv_file_1_2, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(data_1_2)
+    logger.info(f"Dane (semestry 1-4) zapisane do pliku {csv_file_1_2}")
+
+# Zapis do CSV dla pozostałych przedmiotów – nazwa pliku pobrana z elementu HTML
+if data_others:
+    with open(specialty_filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(data_others)
+    logger.info(f"Dane (semestry powyżej 4) zapisane do pliku {specialty_filename}")
+
 driver.quit()
