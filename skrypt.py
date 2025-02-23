@@ -1,3 +1,4 @@
+import os
 import csv
 import re
 import yaml
@@ -6,8 +7,12 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.firefox.service import Service
 
-# Wczytanie konfiguracji z rules.yaml
-with open("rules.yaml", "r", encoding="utf-8") as file:
+# Upewnij się, że folder output istnieje
+output_folder = "output"
+os.makedirs(output_folder, exist_ok=True)
+
+# Wczytanie konfiguracji z config.yaml
+with open("config.yaml", "r", encoding="utf-8") as file:
     config = yaml.safe_load(file)
 special_ranges = {key.lower(): value for key, value in config.get("special_ranges", {}).items()}
 special_subjects = {subject.lower() for subject in config.get("special_subjects", [])}
@@ -176,23 +181,23 @@ driver.get(main_url)
 
 # --- Ekstrakcja nazwy specjalności dla późniejszej nazwy pliku ---
 try:
-    # Szukamy akapitu (<p>) wewnątrz elementu o id "tresc-raportu", który zawiera <strong> z "Specjalność"
     specialty_element = driver.find_element(
         By.XPATH, '//div[@id="tresc-raportu"]/p[strong[contains(text(), "Specjalność")]]'
     )
-    # Pobieramy zawartość HTML tego akapitu
     specialty_html = specialty_element.get_attribute("innerHTML")
-    # Używamy wyrażenia regularnego, aby pobrać tekst po tagu <strong>
     match = re.search(r"<strong>Specjalność:?</strong>\s*(.+)", specialty_html)
     if match:
         specialty = match.group(1).strip()
     else:
         raise ValueError("Nie znaleziono tekstu specjalności")
-    # Zamiana spacji i znaków nowej linii na podkreślenia
-    specialty_filename = specialty.replace(" ", "_").replace("\n", "_")
-    # Usuwamy potencjalnie niedozwolone znaki w nazwie pliku
+    specialty_filename = (
+        specialty
+        .replace("- ", "-")
+        .replace(" -", "-")
+        .replace(" ", "_")
+        .replace("\n", "_")
+    )
     specialty_filename = re.sub(r'[\/:*?"<>|]', '', specialty_filename)
-    # (Opcjonalnie) Dodajemy rozszerzenie .csv, jeśli jest wymagane
     specialty_filename = specialty_filename + ".csv"
 except Exception as e:
     logger.error("Nie można pobrać nazwy specjalności, używam domyślnej nazwy")
@@ -215,11 +220,8 @@ for el in subject_elements:
 
 logger.info(f"Znaleziono {len(subject_links)} pozycji (przedmioty lub moduły).")
 
-# Używamy jednego zbioru do deduplikacji pełnych nazw przedmiotów (w tym wersji specjalnych)
 processed_subjects = set()
 data = []
-
-# Dodajemy zbiór do deduplikacji modułów
 processed_modules = set()
 
 for idx, (subject_name, href, is_module, main_info) in enumerate(subject_links, start=1):
@@ -227,7 +229,6 @@ for idx, (subject_name, href, is_module, main_info) in enumerate(subject_links, 
     logger.info(f"[{idx}/{len(subject_links)}] Przetwarzam: {subject_name}")
 
     if is_module:
-        # Sprawdzamy, czy moduł już został przetworzony
         if subject_name in processed_modules:
             logger.info(f"Moduł {subject_name} już przetworzony – pomijam.")
             continue
@@ -268,7 +269,6 @@ for idx, (subject_name, href, is_module, main_info) in enumerate(subject_links, 
                 except Exception as e:
                     logger.error(f"Błąd przy przetwarzaniu przedmiotu {mod_sub_name}: {e}")
     else:
-        # Dla przedmiotów spoza modułu kluczem będzie pełna nazwa
         if subject_name in processed_subjects:
             logger.info(f"Przedmiot {subject_name} już przetworzony – pomijam.")
             continue
@@ -297,14 +297,11 @@ fieldnames = [
 ]
 
 # Podział danych na dwa zbiory:
-# - Przedmioty z semestrów 1-4
-# - Pozostałe przedmioty (np. semestr 5+)
 data_1_2 = []
 data_others = []
 for d in data:
     try:
         sem = d.get("Semestr", "")
-        # Pobieramy pierwszy numer – przyjmujemy, że jest liczbą
         sem_num = int(sem.split()[0])
     except Exception:
         sem_num = None
@@ -315,7 +312,7 @@ for d in data:
 
 # Zapis do CSV dla przedmiotów 1-4 semestr
 if data_1_2:
-    csv_file_1_2 = "1-2rok.csv"
+    csv_file_1_2 = os.path.join(output_folder, "1-2rok.csv")
     with open(csv_file_1_2, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -324,10 +321,11 @@ if data_1_2:
 
 # Zapis do CSV dla pozostałych przedmiotów – nazwa pliku pobrana z elementu HTML
 if data_others:
-    with open(specialty_filename, "w", newline="", encoding="utf-8") as f:
+    csv_file_specialty = os.path.join(output_folder, specialty_filename)
+    with open(csv_file_specialty, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(data_others)
-    logger.info(f"Dane (semestry powyżej 4) zapisane do pliku {specialty_filename}")
+    logger.info(f"Dane (semestry powyżej 4) zapisane do pliku {csv_file_specialty}")
 
 driver.quit()

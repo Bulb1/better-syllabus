@@ -39,7 +39,7 @@ driver.quit()
 
 # Wczytanie lub utworzenie konfiguracji YAML
 try:
-    with open("rules.yaml", "r", encoding="utf-8") as file:
+    with open("config.yaml", "r", encoding="utf-8") as file:
         config = yaml.safe_load(file) or {}
 except FileNotFoundError:
     config = {}
@@ -58,7 +58,7 @@ new_config = {
 }
 
 # Zapis konfiguracji do pliku
-with open("rules.yaml", "w", encoding="utf-8") as file:
+with open("config.yaml", "w", encoding="utf-8") as file:
     yaml.dump(new_config, file, allow_unicode=True, default_flow_style=False)
 
-print("Plik rules.yaml został zaktualizowany.")
+print("Plik config.yaml został zaktualizowany.")

@@ -4,6 +4,7 @@ from selenium.webdriver.common.by import By
 import csv
 from loguru import logger
 import os
+import yaml  # nowa biblioteka do zapisu YAML
 
 # Tworzenie folderu output, jeśli nie istnieje
 output_folder = "output"
@@ -54,19 +55,43 @@ try:
     # Przełączenie na iframe
     driver.switch_to.frame(driver.find_element(By.ID, "plany_iframe"))
 
-    # Nawigacja do rocznika "2023/2024"
-    rok = '2023/2024'
-    link_rok = driver.find_element(By.XPATH, f"//li[@class='list-page']/a[text()='{rok}']")
-    url_rok = link_rok.get_attribute("href")
-    logger.info("Przechodzę bezpośrednio do: " + url_rok)
-    driver.get(url_rok)
+    # --- Zbieranie dostępnych lat ze strony głównej ---
+    # Na głównej stronie listy zawierają lata zapisane w formacie "YYYY/YYYY"
+    years_elements = driver.find_elements(By.XPATH, "//li[@class='list-page']/a")
+    years = [elem.text.strip() for elem in years_elements if "/" in elem.text]
+    logger.info("Dostępne lata: " + str(years))
 
-    # Nawigacja do kierunku "Informatyka"
-    kierunek = 'Informatyka'
-    link_kierunek = driver.find_element(By.XPATH, f"//li[@class='list-page']/a[text()='{kierunek}']")
-    url_kierunek = link_kierunek.get_attribute("href")
-    logger.info("Przechodzę bezpośrednio do: " + url_kierunek)
-    driver.get(url_kierunek)
+    # Wybieramy konkretny rok (np. '2023/2024')
+    year = '2023/2024'
+    link_year = driver.find_element(By.XPATH, f"//li[@class='list-page']/a[text()='{year}']")
+    url_year = link_year.get_attribute("href")
+    logger.info("Przechodzę do roku: " + url_year)
+    driver.get(url_year)
+
+    # --- Po wybraniu roku zbieramy dostępne kierunki ---
+    major_elements = driver.find_elements(By.XPATH, "//li[@class='list-page']/a")
+    # Przyjmujemy, że kierunki nie zawierają znaku "/" (który występuje w roku)
+    majors = [elem.text.strip() for elem in major_elements if "/" not in elem.text and elem.text.strip() != ""]
+    logger.info("Dostępne kierunki: " + str(majors))
+
+    # Zapisujemy dane do pliku YAML o strukturze:
+    # year:
+    # - 2025/2026
+    # - 2024/2025
+    # major:
+    # - Automatyka i robotyka
+    # - Elektromobilność
+    rules = {"year": years, "major": majors}
+    with open("rules.yaml", "w", encoding="utf-8") as f:
+        yaml.dump(rules, f, allow_unicode=True)
+    logger.info("Zapisano dane do rules.yaml.")
+
+    # Nawigacja do konkretnego kierunku (np. 'Informatyka')
+    major = 'Informatyka'
+    link_major = driver.find_element(By.XPATH, f"//li[@class='list-page']/a[text()='{major}']")
+    url_major = link_major.get_attribute("href")
+    logger.info("Przechodzę do kierunku: " + url_major)
+    driver.get(url_major)
 
     # Pobierz specjalności z sekcji "stacjonarne"
     stacjonarne_specialties = get_specialties_from_section(driver, "stacjonarne")
@@ -79,7 +104,7 @@ try:
         logger.info(f"niestacjonarne: {name} -> {url}")
 
     # Zapisz specjalności stacjonarne do pliku CSV
-    stacjonarne_csv = os.path.join(output_folder, f"{kierunek}_{rok.replace('/', '-')}_stacjonarne.csv")
+    stacjonarne_csv = os.path.join(output_folder, f"{major}_{year.replace('/', '-')}_stacjonarne.csv")
     with open(stacjonarne_csv, "w", newline='', encoding='utf-8') as csvfile:
         csvwriter = csv.writer(csvfile)
         csvwriter.writerow(["Nazwa", "URL"])
@@ -88,7 +113,7 @@ try:
             logger.info(f"Zapisano stacjonarne: {name} -> {url}")
 
     # Zapisz specjalności niestacjonarne do pliku CSV
-    niestacjonarne_csv = os.path.join(output_folder, f"{kierunek}_{rok.replace('/', '-')}_niestacjonarne.csv")
+    niestacjonarne_csv = os.path.join(output_folder, f"{major}_{year.replace('/', '-')}_niestacjonarne.csv")
     with open(niestacjonarne_csv, "w", newline='', encoding='utf-8') as csvfile:
         csvwriter = csv.writer(csvfile)
         csvwriter.writerow(["Nazwa", "URL"])
